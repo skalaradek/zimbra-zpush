@@ -21,7 +21,7 @@ $multiFolderList[] = array( 'ua'=>'NewDevice',         'message'=>true,  'contac
 ************************************************/
 
 $multiFolderList[] = array( 'ua'=>'Apple',             'message'=>true,  'contact'=>true,  'appointment'=>true,  'task'=>true,  'note'=>true  );
-$multiFolderList[] = array( 'ua'=>'Android-SAMSUNG',   'message'=>true,  'contact'=>true,  'appointment'=>true,  'task'=>false, 'note'=>false  );
+$multiFolderList[] = array( 'ua'=>'Android-SAMSUNG',   'message'=>true,  'contact'=>true,  'appointment'=>true,  'task'=>true,  'note'=>false  );
 $multiFolderList[] = array( 'ua'=>'Android/7',         'message'=>true,  'contact'=>false, 'appointment'=>true,  'task'=>true,  'note'=>false  );
 $multiFolderList[] = array( 'ua'=>'Android/6',         'message'=>true,  'contact'=>false, 'appointment'=>true,  'task'=>true,  'note'=>false  );
 $multiFolderList[] = array( 'ua'=>'Android/5',         'message'=>true,  'contact'=>false, 'appointment'=>true,  'task'=>true,  'note'=>false  );

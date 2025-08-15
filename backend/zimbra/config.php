@@ -8,6 +8,9 @@
 * Modified    :   15.12.2016 - Added ZIMBRA_SSL_VERIFYHOST & ZIMBRA_SSL_VERIFYPEER
 *                 07.10.2017 - Added ZIMBRA_DISABLE_BIRTHDAY_SYNC
 *                 16.04.2121 - Added ZIMBRA_DETELESASMOVES
+*                 27.05.2022 - Added ZIMBRA_SYNC_WINDOW_DAYS
+*                 12.05.2023 - Added ZIMBRA_SYNC_GAL_GROUPS
+*                 13.05.2023 - Added ZIMBRA_USE_MB_CHECK_ENCODING
 *
 * Copyright   :   Vincent Sherwood
 ************************************************/
@@ -29,7 +32,7 @@
     // To configure the ZimbraBackend uncomment the appropriate line below and customize as
     // required.
 //    define('ZIMBRA_URL', 'http://zimbraServerName');
-//    define('ZIMBRA_URL', 'https://mail.imanudin.web.id');
+//    define('ZIMBRA_URL', 'https://mail.itsolutions.ie');
 //    define('ZIMBRA_URL', 'http://127.0.0.1');  
     define('ZIMBRA_URL', 'https://127.0.0.1');  
 
@@ -53,7 +56,7 @@
     // environment such as you want Z-Push to connect to an internal IP Address directly
     // you can disable this behaviour by specifying the setting ZIMBRA_DISABLE_URL_OVERRIDE to
     // true. Simply uncomment the line below to disable the behaviour. 
-	define('ZIMBRA_DISABLE_URL_OVERRIDE', true); 
+//	define('ZIMBRA_DISABLE_URL_OVERRIDE', true); 
 
     // On many zimbra FOSS sites the server is stopped each night to facilitate the running of
     // a cold sync final backup. This typically means that zimbra can be unavailable for a
@@ -61,7 +64,7 @@
     // the potential issues with locking out accounts/dropping data from devices/etc. by 
     // holding open login sessions and retrying the authentication a number of times at 60
     // second intervals. The default setting allows for 5 minutes of downtime. 
-	define('ZIMBRA_RETRIES_ON_HOST_CONNECT_ERROR',5);
+	define('ZIMBRA_RETRIES_ON_HOST_CONNECT_ERROR',2);
 
     // If the ZimbraBackend is being setup to use the old style XML configuration files
     // a folder must be specified where these files will reside. The ZIMBRA_USER_DIR 
@@ -116,6 +119,14 @@
     // below and set it to false
 //	define('ZIMBRA_IGNORE_EMAILED_CONTACTS',true);
 
+    // Historically, the Zmbra Backend has not synced any "group" contacts to the devices.
+    // Feature Request #30 - https://sourceforge.net/p/zimbrabackend/feature-requests/30
+    // has argued the case for allowing GAL groups to sync while still blocking user created
+    // groups as before. Adding a new setting ZIMBRA_SYNC_GAL_GROUPS to enable syncing GAL  
+    // groups for those that wish to do so. The default value will be false to maintain
+    // the status quo for those who choose not to set a value 
+//    define('ZIMBRA_SYNC_GAL_GROUPS', false);
+	
     // The setting ZIMBRA_SYNC_CONTACT_PICTURES controls whether z-push is allowed to sync 
     // contact pictures to the device. The default setting is false. To enable it simply
     // uncomment the next line and set it to true
@@ -130,6 +141,17 @@
     // is commented out the default setting of 'ASCII, UTF-8, ISO-8859-1, ISO-8859-15'
     // is used.
 //	  define('ZIMBRA_MB_DETECT_ORDER', 'ASCII, UTF-8, ISO-8859-1, ISO-8859-15' );
+
+    // PHP 8.1 changed the way mb_detect_encoding works (see details of the change in
+    // https://github.com/php/php-src/issues/8279). For some users this has caused
+    // encoding problems. As outlined in 4th to last comment on the issue, a loop
+    // of calls to mb_check_encoding can emulate the previous behaviour. For those that 
+    // need the previous behaviour in the backend a new setting has been added. The 
+    // default value of false will continue to use the mb_detect_encoding but with the
+    // new detection methodology. Setting the value to true will loop through the 
+    // encodings specified (or defaulted) in ZIMBRA_MB_DETECT_ORDER returning the first
+    // one that passes mb_check_encoding 
+//    define('ZIMBRA_USE_MB_CHECK_ENCODING', false);
 
     // With SmartFolders user's have the possibility to define alternative email addresses
     // from which to send emails. To ensure that they only send them from one of their 
@@ -155,7 +177,7 @@
     // backend and then saved for use by subsequent requests from the device to try to minimise
     // the number of zimbra calls z-push needs to make. ZIMBRA_LOCAL_CACHE is enabled by default
     // but can be disabled by uncommenting the next line and setting it to false.
-//    define('ZIMBRA_LOCAL_CACHE', true);
+//    define('ZIMBRA_LOCAL_CACHE', false);
 
     // The ZIMBRA_LOCAL_CACHE when enabled gets refreshed periodically just in case any change 
     // was missed by the ChangesSink process. The default lifetime of the folder content lists
@@ -182,6 +204,17 @@
     // delete them immediately simply uncomment the next line and set it to false.
 //    define('ZIMBRA_DELETESASMOVES', true);
 
+    // By default the zimbra client uses a 366 day before and after window for choosing which
+    // Calendar/Task/Note items to sync to the device. This arbitrary limit was selected when
+    // the devices connecting were showing a limited window of data. However, now that people
+    // are connecting with Outlook and expecting everything to be synced this is no longer
+    // ideal. The setting ZIMBRA_SYNC_WINDOW_DAYS can override that default number. In order 
+    // to specify a different value (from the default of 366) uncomment this setting and set 
+    // it to the appropriate value. Change this setting at your own risk as widening the 
+    // window could have unexpected consequences. Regardless of what value is set here, if 
+    // the client supplies a cutoffdate for searching backwards that value will be used.
+//    define('ZIMBRA_SYNC_WINDOW_DAYS', 366);
+
     // Some older android clients had issues with syncing birthdays which would result in 
     // constant contact sync loops and battery drain. A User Agent check was added to the code
     // to only sync birthdays to Apple and Nokia devices at the time. Newer releases of android
@@ -202,9 +235,13 @@
     // 'setup' - only the additional logging in the folder selection functions is enabled
     // 'username' - zimbra additional logging is enabled for one user - username
     // 'user1,user2,user3,etc' - zimbra additional logging is enabled for the list of users
-//	define('ZIMBRA_DEBUG',true);
-//	define('ZIMBRA_DEBUG','setup');
-//	define('ZIMBRA_DEBUG','username');
+//    define('ZIMBRA_DEBUG',true);
+//    define('ZIMBRA_DEBUG','setup');
+//    define('ZIMBRA_DEBUG','username');
+//    define('ZIMBRA_DEBUG','vincents@itsolutions.ie');
+//    define('ZIMBRA_DEBUG','vincents@itsolutions.ie,vincents');
+//    define('ZIMBRA_DEBUG','vincents');
+//    define('ZIMBRA_DEBUG','itsadmin@itsolutions.ie');
 	
     // ZIMBRA_HTML is a legacy setting that enabled HTML emails on Apple devices (an any others
     // that advertized mimesupport) when using ActiveSync protocol level 2.5 or lower. Newer

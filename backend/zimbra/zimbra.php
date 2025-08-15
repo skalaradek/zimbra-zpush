@@ -1,8 +1,8 @@
 <?php
-$GLOBALS['revision'] = "71"; // Used to output the script version to the debug log
+$GLOBALS['revision'] = "73"; // Used to output the script version to the debug log
 /***********************************************
 * File          :   zimbra.php
-* Revision      :   71 (01-Oct-2021)
+* Revision      :   73 (24-Apr-2024)
 * Project       :   Z-Push Zimbra Backend
 *                   https://sourceforge.net/projects/zimbrabackend
 * Description   :   A backend for Z-Push to use with the Zimbra Collaboration Suite,
@@ -13,7 +13,24 @@ $GLOBALS['revision'] = "71"; // Used to output the script version to the debug l
 *                   Mathias Kolb
 *                   Julien Laurent
 *
-* Changes       :   Changes Made To Revision 71: z-push-2 version ONLY
+* Changes       :   Changes Made To Revision 73: z-push-2 version ONLY
+*                     - Added pause to ChangesSink to normalise timing loop
+*                     - Add filters to skip non-supported folder views
+*                     - Added code to support AS16.1 Find command in GetMailboxSearchResults
+*                     - Check for empty from address in email to avoid warnings
+*                     - Fix displayto to show Text without email address where possible
+*
+* Changes       :   Changes Made To Revision 72: z-push-2 version ONLY
+*                     - GetNextMessageBlock - Moved optional parameter output to last place
+*                     - Changed range handling in GetGALSearchResults
+*                     - Added config.php option ZIMBRA_SYNC_WINDOW_DAYS
+*                     - Add Auth Failed/Token Expired handling for XML responses
+*                     - New setting ZIMBRA_SYNC_GAL_GROUPS
+*                     - Ensure $bodyPrefArray is always an array, never false, for PHP 8.1+
+*                     - New setting ZIMBRA_USE_MB_CHECK_ENCODING for PHP 8.1+
+*                     - Add handling for Zimbra 10 "Files shared with me"
+*
+*                   Changes Made To Revision 71: z-push-2 version ONLY
 *                     - Removed zimbra specific version of include file z_RTF.php
 *                     - Don't output "" for empty Task dates and reminderset
 *                     - Changed reporting of error mail.NO_SUCH_WAITSET to LOGLEVEL_DEBUG
@@ -112,6 +129,12 @@ $GLOBALS['revision'] = "71"; // Used to output the script version to the debug l
 *                   === To prevent sync of the "emailed contacts" folder
 *                   define('ZIMBRA_IGNORE_EMAILED_CONTACTS',true);
 *
+*                   === To enable sync of GAL Groups to devices ===
+*                   define('ZIMBRA_SYNC_GAL_GROUPS', true);
+*
+*                   === To enable sync of mb_check_encoding for PHP 8.1+ ===
+*                   define('ZIMBRA_USE_MB_CHECK_ENCODING', true);
+*
 *                   === To enable HTML email for MIME supporting devices - mainly Apple iPxxx ===
 *                   define('ZIMBRA_HTML',true);
 *
@@ -200,6 +223,19 @@ $GLOBALS['revision'] = "71"; // Used to output the script version to the debug l
 *                   to the Trash folder when they are deleted on the client. To bypass the Trash folder and
 *                   delete them immediately simply uncomment the next line and set it to false.
 *                   define('ZIMBRA_DELETESASMOVES', false);
+*
+*
+*                   === To Change the default 366 day sync window ===
+*                   By default the zimbra client uses a 366 day before and after window for choosing which
+*                   Calendar/Task/Note items to sync to the device. This arbitrary limit was selected when
+*                   the devices connecting were showing a limited window of data. However, now that people
+*                   are connecting with Outlook and expecting everything to be synced this is no longer
+*                   ideal. The setting ZIMBRA_SYNC_WINDOW_DAYS can override that default number. In order 
+*                   to specify a different value (from the default of 366) uncomment this setting and set 
+*                   it to the appropriate value. Change this setting at your own risk as widening the 
+*                   window could have unexpected consequences. Regardless of what value is set here, if 
+*                   the client supplies a cutoffdate for searching backwards that value will be used.
+*                   define('ZIMBRA_SYNC_WINDOW_DAYS', 366);
 *
 *
 * Feature Disable:  Several users have asked over time if it is possible to turn off Email sync or
@@ -571,17 +607,18 @@ class BackendZimbra extends BackendDiff {
     protected $_pingtokenOne = "";
     protected $_pingtimeOne = "";
 
-    protected $_pingVirtualChanges = array( 'message'=>false, 'contact'=>false, 'appointment'=>false, 'task'=>false, 'document'=>false, 'wiki'=>false, 'note'=>false  );
+    protected $_pingVirtualChanges = array( 'message'=>false, 'contact'=>false, 'appointment'=>false, 'task'=>false, 'document'=>false, 'note'=>false  );
 
     protected $_usertags = array();
 
     protected $_linkOwners = array();
-		
     protected $_smartFolders = true;
-    protected $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'wiki'=>false, 'note'=>true );
-    protected $_deviceMultiFolderSupport = array( 'message'=>true, 'contact'=>false, 'appointment'=>false, 'task'=>false, 'document'=>true, 'wiki'=>false, 'note'=>false );
+    protected $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+    protected $_deviceMultiFolderSupport = array( 'message'=>true, 'contact'=>false, 'appointment'=>false, 'task'=>false, 'document'=>true, 'note'=>false );
     protected $_serverInviteReply = false;
     protected $_ignoreEmailedContacts = true;
+    protected $_syncGalGroups = false;
+    protected $_useMbCheckEncoding = false;
     protected $_disableBirthdaySync = false;
 
     protected $_localCache = true;
@@ -590,6 +627,7 @@ class BackendZimbra extends BackendDiff {
     protected $_saveCacheOnLogoff = false;
     protected $_cacheSupports = array('read','replied','forwarded','categories');
     protected $_shareIndex = array();
+    protected $_syncWindowDays = 366;
 
     protected $_soapDelayMicroSeconds = 0; // default no delay between SoapRequests (milliseconds)
 
@@ -837,11 +875,30 @@ class BackendZimbra extends BackendDiff {
             }
         }
 
+        if (defined('ZIMBRA_SYNC_GAL_GROUPS')) {
+            $this->_syncGalGroups = ($this->ToBool(ZIMBRA_SYNC_GAL_GROUPS) === true);
+            if ($this->_syncGalGroups) {
+                ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->Logon(): ' .  'Setting _syncGalGroups for server to [true]'); 
+            }
+        }
+
+        if (defined('ZIMBRA_USE_MB_CHECK_ENCODING')) {
+            $this->_useMbCheckEncoding = ($this->ToBool(ZIMBRA_USE_MB_CHECK_ENCODING) === true);
+            if ($this->_useMbCheckEncoding) {
+                ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->Logon(): ' .  'Setting _useMbCheckEncoding for server to [true]'); 
+            }
+        }
+
         if (defined('ZIMBRA_DISABLE_BIRTHDAY_SYNC')) {
             $this->_disableBirthdaySync = ($this->ToBool(ZIMBRA_DISABLE_BIRTHDAY_SYNC) === true);
             if ($this->_disableBirthdaySync) {
                 ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->Logon(): ' .  'Setting _disableBirthdaySync to [true]'); 
             }
+        }
+
+        if (defined('ZIMBRA_SYNC_WINDOW_DAYS') && is_integer(ZIMBRA_SYNC_WINDOW_DAYS)) {
+            $this->_syncWindowDays = ZIMBRA_SYNC_WINDOW_DAYS;
+            ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->Logon(): ' .  'ZIMBRA_SYNC_WINDOW_DAYS is defined and set to [' . $this->_syncWindowDays . ']'); 
         }
 
         if (!class_exists("Request")) {
@@ -1687,7 +1744,7 @@ class BackendZimbra extends BackendDiff {
                 }
             }
 
-            // protected $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>false, 'wiki'=>false, 'note'=>true );
+            // protected $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>false, 'note'=>true );
             $this->_userFolderTypeActive['message'] = (isset($subset['zimbraFeatureMailEnabled']) ? $this->ToBool($subset['zimbraFeatureMailEnabled']) : $this->_userFolderTypeActive['message'] );
             $this->_userFolderTypeActive['contact'] = (isset($subset['zimbraFeatureContactsEnabled']) ? $this->ToBool($subset['zimbraFeatureContactsEnabled']) : $this->_userFolderTypeActive['contact'] );
             $this->_userFolderTypeActive['appointment'] = (isset($subset['zimbraFeatureCalendarEnabled']) ? $this->ToBool($subset['zimbraFeatureCalendarEnabled']) : $this->_userFolderTypeActive['appointment'] );
@@ -1699,7 +1756,6 @@ class BackendZimbra extends BackendDiff {
                 $this->_userFolderTypeActive['document'] = false;  // Cannot handle documents without z-push having the relevant class(es) built-in
             }
 
-//            $this->_userFolderTypeActive['wiki'] = (isset($subset['zimbraFeatureWikiEnabled']) ? $this->ToBool($subset['zimbraFeatureWikiEnabled']) : $this->_userFolderTypeActive['wiki'] );
             $this->_userFolderTypeActive['note'] = (isset($subset['zimbraFeatureTasksEnabled']) ? $this->ToBool($subset['zimbraFeatureTasksEnabled']) : $this->_userFolderTypeActive['note'] );
 
             $subset = $contents['Body']['GetInfoResponse']['prefs']['_attrs'];
@@ -1862,11 +1918,6 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
             $user['document'][0]['virtual'] = 'false';
             $user['document'][0]['primary'][0]['identifier'] = 'id';
             $user['document'][0]['primary'][0]['id'] = '16';  // Briefcase (in English)
-            // Added wiki to accomodate servers that run, or once ran, version 5.0.x of zimbra
-            $user['wiki'][0]['active'] = ($this->_userFolderTypeActive['wiki'] ? 'true' : 'false' );
-            $user['wiki'][0]['virtual'] = 'false';
-            $user['wiki'][0]['primary'][0]['identifier'] = 'id';
-            $user['wiki'][0]['primary'][0]['id'] = '16';  // Briefcase (in English)
             // Added note to accomodate clients that can send Sticky Notes - eg. iOS7
             $user['note'][0]['active'] = ($this->_userFolderTypeActive['note'] ? 'true' : 'false' );
             $user['note'][0]['virtual'] = (defined('ZIMBRA_VIRTUAL_NOTES') ? (($this->ToBool(ZIMBRA_VIRTUAL_NOTES)) ? 'true' : 'false') : 'true' );
@@ -2019,6 +2070,13 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                 if (!isset($folders[$i]['view']) || $folders[$i]['view'] == "") {
                     $folders[$i]['view'] = "message";
                 }
+
+                // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                if (!array_key_exists($folders[$i]['view'], $this->_userFolderTypeActive)) {
+                    ZLog::Write(LOGLEVEL_INFO, 'Zimbra->GetZimbraSmartFolders(): ' .  "Ignoring Folder [".$folders[$i]['name']."] with unsupported 'view' [".$folders[$i]['view']."]" );
+                    continue;
+                }
+
                 if ($folders[$i]['view'] == "task" && strtolower(substr($folders[$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                     $folders[$i]['view'] = "note";
                     $user[$folders[$i]['view']][0]['active'] = 'true';
@@ -2051,6 +2109,13 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                 if (!isset($links[$i]['view']) || $links[$i]['view'] == "") {
                     $links[$i]['view'] = "message";
                 }
+
+                // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                if (!array_key_exists($links[$i]['view'], $this->_userFolderTypeActive)) {
+                    ZLog::Write(LOGLEVEL_INFO, 'Zimbra->GetZimbraSmartFolders(): ' . "Ignoring Linked Folder [".$links[$i]['name']."] with unsupported 'view' [".$links[$i]['view']."]" );
+                    continue;
+                }
+
                 if ($links[$i]['view'] == "task" && strtolower(substr($links[$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                     $links[$i]['view'] = "note";
                     $user[$links[$i]['view']][0]['active'] = 'true';
@@ -2081,6 +2146,13 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                 if (!isset($searches[$i]['view']) || $searches[$i]['view'] == "") {
                     $searches[$i]['view'] = "message";
                 }
+
+                // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                if (!array_key_exists($searches[$i]['view'], $this->_userFolderTypeActive)) {
+                    ZLog::Write(LOGLEVEL_INFO, 'Zimbra->GetZimbraSmartFolders(): ' .  "Ignoring Search Folder [".$searches[$i]['name']."] with unsupported 'view' [".$searches[$i]['view']."]" );
+                    continue;
+                }
+
                 if ($searches[$i]['view'] == "task" && strtolower(substr($searches[$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                     $searches[$i]['view'] = "note";
                     $user[$searches[$i]['view']][0]['active'] = 'true';
@@ -2158,7 +2230,12 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
         }
 
         if (isset($folder['zid'])) {
-            if (isset($folder['owner'])) {
+           // Zimbra 10 "Files shared with me" has zid=0 and no rid
+           if ($folder['zid'] == "0") {
+                if (!isset($this->_shareOwners[$folder['zid']])) {
+                    $this->_shareOwners[$folder['zid']] = "SYSTEM";
+                }
+            } elseif (isset($folder['owner'])) {
                 if (!isset($this->_shareOwners[$folder['zid']])) {
                     $this->_shareOwners[$folder['zid']] = $folder['owner'];
                 }
@@ -2175,8 +2252,11 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
         } else {
             if (isset($folder['zid'])) {
                 $zid = $folder['zid'];
-                $rid = $folder['rid'];
-            } 
+                // Zimbra 10 "Files shared with me" has zid=0 and no rid
+                if (!("0" == $zid)) {
+                    $rid = $folder['rid'];
+                }
+            }
         }
 
         if (isset($folder['view']) && $folder['view'] <> '') {
@@ -2196,7 +2276,7 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
 
         // Add a 'N' after the folder designation and before the folder Id for use in Hierarchy Change Detection
         $noteFlag = ($folder['view'] == "note" ? 'N' : '' );
-        if (isset($zid)) {
+        if (isset($zid) && ($zid != "0")) {
             if (isset($this->_linkOwners[$zid])) {
                 $owner = $this->_linkOwners[$zid];
             } else {
@@ -2339,6 +2419,11 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                     if (!isset($folder['folder'][$i]['view']) || $folder['folder'][$i]['view'] == "") {
                         $folder['folder'][$i]['view'] = "message";
                     }
+                    // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                    if (!array_key_exists($folder['folder'][$i]['view'], $this->_userFolderTypeActive)) {
+                        ZLog::Write(LOGLEVEL_INFO, 'Zimbra->ProcessZimbraSmartFolderRecursive(): ' .  "Ignoring Folder [".$folder['folder'][$i]['name']."] with unsupported 'view' [".$folder['folder'][$i]['view']."]" );
+                        continue;
+                    }
                     if ($folder['folder'][$i]['view'] == "task" && strtolower(substr($folder['folder'][$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                         $folder['folder'][$i]['view'] = "note";
                         $user[$folder['folder'][$i]['view']][0]['active'] = 'true';
@@ -2372,6 +2457,11 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                     if (!isset($folder['link'][$i]['view']) || $folder['link'][$i]['view'] == "") {
                         $folder['link'][$i]['view'] = "message";
                     }
+                    // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                    if (!array_key_exists($folder['link'][$i]['view'], $this->_userFolderTypeActive)) {
+                        ZLog::Write(LOGLEVEL_INFO, 'Zimbra->ProcessZimbraSmartFolderRecursive(): ' .  "Ignoring Linked Folder [".$folder['link'][$i]['name']."] with unsupported 'view' [".$folder['link'][$i]['view']."]" );
+                        continue;
+                    }
                     if ($folder['link'][$i]['view'] == "task" && strtolower(substr($folder['link'][$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                         $folder['link'][$i]['view'] = "note";
                         $user[$folder['link'][$i]['view']][0]['active'] = 'true';
@@ -2404,6 +2494,11 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
                     // Default folder "view" to message - as older zimbra releases did not populate the view property
                     if (!isset($folder['search'][$i]['view']) || $folder['search'][$i]['view'] == "") {
                         $folder['search'][$i]['view'] = "message";
+                    }
+                    // $_userFolderTypeActive = array( 'message'=>true, 'contact'=>true, 'appointment'=>true, 'task'=>true, 'document'=>true, 'note'=>true );
+                    if (!array_key_exists($folder['search'][$i]['view'], $this->_userFolderTypeActive)) {
+                        ZLog::Write(LOGLEVEL_INFO, 'Zimbra->ProcessZimbraSmartFolderRecursive(): ' .  "Ignoring Folder [".$folder['search'][$i]['name']."] with unsupported 'view' [".$folder['search'][$i]['view']."]" );
+                        continue;
                     }
                     if ($folder['search'][$i]['view'] == "task" && strtolower(substr($folder['search'][$i]['name'],0,5)) == "notes" && $this->_userFolderTypeActive['note'] == true) {
                         $folder['search'][$i]['view'] = "note";
@@ -2773,12 +2868,6 @@ ZLog::Write(LOGLEVEL_DEBUG, "Transitions Slice=" . print_r(array_slice($transiti
         $user['document'][0]['primary'][0]['identifier'] = 'id';
         $user['document'][0]['primary'][0]['id'] = '16';  // Briefcase (in English)
         $user['document'][0]['folders'][0]['filtermethod'][0] = 'none';
-        // Added wiki to accomodate servers that run, or once ran, version 5.0.x of zimbra
-        $user['wiki'][0]['active'] = 'false';
-        $user['wiki'][0]['virtual'] = 'false';
-        $user['wiki'][0]['primary'][0]['identifier'] = 'id';
-        $user['wiki'][0]['primary'][0]['id'] = '16';  // Briefcase (in English)
-        $user['wiki'][0]['folders'][0]['filtermethod'][0] = 'none';
         // Added note to accomodate clients that can send Sticky Notes - eg. iOS7
         $user['note'][0]['active'] = 'true';
         $user['note'][0]['virtual'] = 'false';
@@ -2863,7 +2952,12 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetZimbraFolders(): ' .  'SOAP response: '.
                     $this->_folders[$j]->name = $array[$i]['name'];
 
                     if (isset($array[$i]['zid'])) {
-                        if (isset($array[$i]['owner'])) {
+                        // Zimbra 10 "Files shared with me" has zid=0 and no rid
+                        if ($array[$i]['zid'] == "0") {
+                            if (!isset($this->_shareOwners[$array[$i]['zid']])) {
+                                $this->_shareOwners[$array[$i]['zid']] = "SYSTEM";
+                            }
+                        } elseif (isset($array[$i]['owner'])) {
                             if (!isset($this->_shareOwners[$array[$i]['zid']])) {
                                 $this->_shareOwners[$array[$i]['zid']] = $array[$i]['owner'];
                             }
@@ -3695,13 +3789,6 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
     public function IsFolderCacheUpToDate($folderid, $folderMetaData, $cutoffdate, $zimbraCutOffDate) {
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->IsFolderCacheUpToDate(): ' . 'START IsFolderCacheUpToDate { folderid = ' . $folderid . '; cutoffdate = ' . $cutoffdate . ' }');
 
-
-
-
-
-
-
-
         if (isset($this->_cachedMessageLists[$folderid]) && isset($this->_cachedMessageLists[$folderid]['cachetime'])) {
             $cacheAge = time() - $this->_cachedMessageLists[$folderid]['cachetime'];
 //ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->IsFolderCacheUpToDate(): ' .  'Cache AGE ('.$cacheAge.'s old) Cached at ['.$this->_cachedMessageLists[$folderid]['cachetime'].'] Time is ['.time().']' );
@@ -3746,7 +3833,7 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
     }
 
 
-    public function GetNextMessageBlock($folderid, $zimbraFolderId, $cutoffdate, $zimbraCutOffDate, $folderMetaData, $view, $limit, $offset = 0, &$output, &$more) {
+    public function GetNextMessageBlock($folderid, $zimbraFolderId, $cutoffdate, $zimbraCutOffDate, $folderMetaData, $view, $limit, &$output, &$more, $offset = 0) {
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetNextMessageBlock(): ' . 'START GetNextMessageBlock { folderid = ' . $folderid . '; cutoffdate = ' . $cutoffdate . '; offset = ' . $offset . ' }');
 
         switch ($view) {
@@ -3797,14 +3884,17 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
                 // TO DO - Where did 366 come from ?
                 if ($cutoffdate != "0") {
                     $calExpandInstStart = strval($cutoffdate) ."000";
-                    $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                    $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                    $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                     $soap ='<SearchRequest types="appointment" xmlns="urn:zimbraMail" limit="'.$limit.'" offset="'.$offset.'" '.
                                 ' calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'" >
                                 <query>inid:"'.$zimbraFolderId.'" </query>
                             </SearchRequest>';
                 } else {
-                    $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
-                    $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                    $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
+//                    $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                    $calExpandInstStart = strval(time() - ($this->_syncWindowDays*24*60*60)) ."000";
+                    $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                     $soap ='<SearchRequest types="appointment" xmlns="urn:zimbraMail" limit="'.$limit.'" offset="'.$offset.'" '.
                                 ' calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'" >
                                 <query>inid:"'.$zimbraFolderId.'"</query>
@@ -3816,8 +3906,10 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
             case 'task':
 
                 $searchResponseSubset = 'task';
-                $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
-                $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
+//                $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                $calExpandInstStart = strval(time() - ($this->_syncWindowDays*24*60*60)) ."000";
+                $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                 $soap ='<SearchRequest xmlns="urn:zimbraMail" types="task"  limit="'.$limit.'" offset="'.$offset.'" ';
                 $soap .=     '    calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'" ';
                 if ($cutoffdate == -1) { // Filter out Completed Tasks
@@ -3834,8 +3926,10 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
             case 'note':
 
                 $searchResponseSubset = 'task';
-                $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
-                $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
+//                $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                $calExpandInstStart = strval(time() - ($this->_syncWindowDays*24*60*60)) ."000";
+                $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                 $soap ='<SearchRequest xmlns="urn:zimbraMail" types="task"  limit="'.$limit.'" offset="'.$offset.'" ';
                 $soap .=     '    calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'" ';
                 if ($cutoffdate == -1) { // Filter out Completed Tasks
@@ -3893,10 +3987,15 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
 
                     case 'contact':
 
-                        // Find The Contact Type And Exclude Contact Groups
+                        // Find The Contact Type And Exclude User Created Contact Groups
+                        // Optionally allow the sync of GAL Groups
                         if (isset($items[$i]['_attrs']['type'])) {
                             if ($items[$i]['_attrs']['type'] == "group") {
-                                continue 2;
+                                if ($this->_syncGalGroups && isset($items[$i]['_attrs']['email'])) {
+                                } else {
+                                    // User created groups do not have an email attribute
+                                    continue 2;
+                                }
                             }
                         }
                         break;
@@ -3970,14 +4069,6 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
             return $output;
         }
 
-
-
-
-
-
-
-
-        
         // Always override CutOffDate for Contacts
         if ('contact' == $view) { 
                 $cutoffdate = '0';
@@ -3996,7 +4087,7 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
             $offset = 0;
             $more = false;
             do {
-                if (false == $this->GetNextMessageBlock($folderid, $zimbraFolderId, $cutoffdate, $zimbraCutOffDate, $this->_folders[$index], $view, $limit, $offset, $output, $more)) {
+                if (false == $this->GetNextMessageBlock($folderid, $zimbraFolderId, $cutoffdate, $zimbraCutOffDate, $this->_folders[$index], $view, $limit, $output, $more, $offset)) {
                     ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessageList(): ' . 'END GetNextMessageBlock ' . strtoupper($view) . 'S { ERROR }');
                     return false;
                 }
@@ -4027,10 +4118,6 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
             }
         }
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessageList(): ' . 'END GetMessageList ' . strtoupper($view) . 'S { count = ' . count($output) . ' }');
-
-
-
-
 //ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessageList(): ' .  'Folder Cache at END GET MESSAGE LISTS:  ['.print_r($this->_cachedMessageLists, true).']', false );
 
         return $output;
@@ -4362,23 +4449,22 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangeFolder(): ' .  'OldID is set - Want t
         $bodyPrefKeys = $contentparameters->GetBodyPreference();
         //ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Body Preferences ['.print_r( $bodyPrefKeys, true ).']' );
 
+        // Always initialise $bodyPrefArray - for PHP 8.1+
+        $bodyPrefArray = array();
         if ($bodyPrefKeys) {
-            $bodyPrefArray = array();
-        } else {
-            $bodyPrefArray = false;
-        }
-
-        for ($i=0;$i<count($bodyPrefKeys);$i++) {
-            $bodyPreference = new BodyPreference();
-            $bodyType = $bodyPrefKeys[$i];
-            $bodyPreference = $contentparameters->BodyPreference($bodyType);
-            $bodyPrefArray[$bodyType] = array();
-            if ($bodyPreference->HasValues()) {
-                if ($bodyPreference->GetTruncationSize()) $bodyPrefArray[$bodyType]["TruncationSize"] = $bodyPreference->GetTruncationSize();
-                if ($bodyPreference->GetAllOrNone()) $bodyPrefArray[$bodyType]["allornone"] = $bodyPreference->GetAllOrNone();
-                if ($bodyPreference->GetPreview()) $bodyPrefArray[$bodyType]["Preview"] = $bodyPreference->GetPreview();
+            for ($i=0;$i<count($bodyPrefKeys);$i++) {
+                $bodyPreference = new BodyPreference();
+                $bodyType = $bodyPrefKeys[$i];
+                $bodyPreference = $contentparameters->BodyPreference($bodyType);
+                $bodyPrefArray[$bodyType] = array();
+                if ($bodyPreference->HasValues()) {
+                    if ($bodyPreference->GetTruncationSize()) $bodyPrefArray[$bodyType]["TruncationSize"] = $bodyPreference->GetTruncationSize();
+                    if ($bodyPreference->GetAllOrNone()) $bodyPrefArray[$bodyType]["allornone"] = $bodyPreference->GetAllOrNone();
+                    if ($bodyPreference->GetPreview()) $bodyPrefArray[$bodyType]["Preview"] = $bodyPreference->GetPreview();
+                }
             }
         }
+
 
 /*
 ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'BodyPreference [
@@ -4466,6 +4552,7 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Batch MSG ['.print_r($m
                         $total = count($msg['e']);
                     }
                     $from = ''; $to = ''; $cc = ''; $bcc = ''; $replyto = '';
+                    $display_name = ''; $display_to = ''; $display_cc = ''; $display_bcc = '';
                     for ($i=0;$i<$total;$i++) {
 
                     // Set $name = in order of preference - Personal Name, Display name, Email address
@@ -4474,9 +4561,17 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Batch MSG ['.print_r($m
                         } else {
                             $name = "";
                         }
-                        $addr = $msg['e'][$i]['a'];
+                        if (isset($msg['e'][$i]['a'])) {
+                            $addr = $msg['e'][$i]['a'];
+                        } else {
+                            $addr = "";
+                        }
                         if (!empty($name)) {
+                            $display_name = $name;
                             $addr = "\"" . $name . "\" <" . $addr . ">";
+                        } else {
+                            $parts = explode( '@', $addr);
+                            $display_name = $parts[0];
                         }
                         
                         switch ($msg['e'][$i]['t']) {
@@ -4485,12 +4580,15 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Batch MSG ['.print_r($m
                                 break;
                             case 't':
                                 $to .= empty($to) ? $addr : ", " . $addr;
+                                $display_to .= empty($display_to) ? $display_name : ";" . $display_name;
                                 break;
                             case 'c':
                                 $cc .= empty($cc) ? $addr : ", " . $addr;
+                                $display_cc .= empty($display_cc) ? $display_name : "; " . $display_name;
                                 break;
                             case 'b':
                                 $bcc .= empty($bcc) ? $addr : ", " . $addr;
+                                $display_bcc .= empty($display_bcc) ? $display_name : "; " . $display_name;
                                 break;
                             case 'r':
                                 $replyto .= empty($replyto) ? $addr : ", " . $addr;
@@ -4537,12 +4635,14 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Batch MSG ['.print_r($m
                         $output->subject = $msg['su'];
                     } 
 
-                    if ($to != "") $output->displayto = $to;   // TODO: What is the difference between 'displayto' and 'to'?
                     if ($to != "") $output->to = $to;
+                    if ($to != "") $output->displayto = $display_to;
                     if ($cc != "") $output->cc = $cc;
                     if ($from != "") $output->from = $from;
                     if ($replyto != "") $output->reply_to = $replyto;
-
+                    // AS16.1 Output DisplayCC and Display_BCC
+                    if ($cc != "") $output->displaycc = $display_cc;
+                    if ($bcc != "") $output->displaybcc = $display_bcc;
 
 
                     // Get the primary and secondary content type to detertmine if it is an S/MIME message
@@ -6042,6 +6142,29 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMessage(): ' .  'Batch MSG ['.print_r($m
 	} // end TagsToCategories
 
 
+    /** GetFirstMatchingEncoding
+    *   As PHP 8.1 onwards change mb_detect_encoding, test each supplied encoding in order - See https://github.com/php/php-src/issues/8279
+    */
+    function GetFirstMatchingEncoding(string $string, string $encodingOptions) {
+        ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetFirstMatchingEncoding(): $encodingOptions = ' . $encodingOptions ); 
+        if (trim($encodingOptions) != '') {
+   //         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetFirstMatchingEncoding(): $encodingOptions IS NOT empty'); 
+            $encodings = explode(",", $encodingOptions);
+   //         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetFirstMatchingEncoding(): $encodings [' . print_r( $encodings, true) . ']'); 
+            foreach($encodings as $encoding) {
+                $encoding = trim($encoding);
+   //             ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetFirstMatchingEncoding(): Checking $encoding [' . $encoding . ']'); 
+                if (($encoding != '') and (mb_check_encoding($string, $encoding))) {
+                    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetFirstMatchingEncoding(): $encoding [' . $encoding . '] MATCHED!'); 
+                    return $encoding;
+                }
+            }
+        }
+        // Default to UTF-8
+        return 'UTF-8';
+    }
+
+
     /** GetMpBodyRecursive
     *   Get all parts in the message with specified type and concatenate them together, unless the
     *   Content-Disposition is 'attachment', in which case the text is apparently an attachment
@@ -6131,8 +6254,18 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMpBodyRecursive(): ' .  'Size ['. $mimep
                 $partText = iconv("WINDOWS-1251", "UTF-8//IGNORE//TRANSLIT", $outpt);
             }
             if (function_exists("mb_detect_encoding")) {
-                $sourceEncoding = mb_detect_encoding($partText, $this->_mbDetectOrder); // get encoding from body
-
+                // As PHP 8.1+ change mb_detect_endocing - use function GetFirstMatchingEncoding for newer PHP versions
+                ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMpBodyRecursive(): ' .  'PHP_VERSION [' . PHP_VERSION . '] - MAJOR [' . PHP_MAJOR_VERSION . '] - MINOR [' . PHP_MINOR_VERSION . '] - _useMbCheckEncoding [' . $this->_useMbCheckEncoding . ']');
+                if (((PHP_MAJOR_VERSION > 8) or ((PHP_MAJOR_VERSION == 8) and (PHP_MINOR_VERSION > 0))) and ($this->_useMbCheckEncoding)) {
+                    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMpBodyRecursive(): ' .  'Using GetFirstMatchingEncoding/mb_check_encoding for PHP 8.1+');
+                    $sourceEncoding = $this->GetFirstMatchingEncoding($partText, $this->_mbDetectOrder); // get encoding from body
+                } elseif (! $this->_useMbCheckEncoding) {
+                    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMpBodyRecursive(): ' .  'Using mb_detect_encoding as $this->_useMbCheckEncoding is FALSE or Not Set');
+                    $sourceEncoding = mb_detect_encoding($partText, $this->_mbDetectOrder); // get encoding from body
+                } else {
+                    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMpBodyRecursive(): ' .  'Using mb_detect_encoding for <= PHP 8.0');
+                    $sourceEncoding = mb_detect_encoding($partText, $this->_mbDetectOrder); // get encoding from body
+                }
                 if (strtoupper($sourceEncoding) != "UTF-8" ) {
                     $partText = iconv( $sourceEncoding, "UTF-8//IGNORE//TRANSLIT", $partText);
                 }
@@ -9878,14 +10011,17 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->SetMessageFlag(): ' .  'Setting Flag' );
                     // TO DO - Where did 366 come from ?
                     if ($cutoffdate != "0") {
                         $calExpandInstStart = strval($cutoffdate) ."000";
-                        $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                        $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                        $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                         $soap ='<SearchRequest types="appointment" xmlns="urn:zimbraMail" fetch="'.$id.'" limit="'.$limit.'" offset="'.$offset.'" '.
                                     ' calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'"  resultMode="IDS" >
                                     <query>inid:"'.$zimbraFolderId.'" </query>
                                 </SearchRequest>';
                     } else {
-                        $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
-                        $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+//                        $calExpandInstStart = strval(time() - (366*24*60*60)) ."000";
+//                        $calExpandInstEnd = strval(time() + (366*24*60*60)) ."000";
+                        $calExpandInstStart = strval(time() - ($this->_syncWindowDays*24*60*60)) ."000";
+                        $calExpandInstEnd = strval(time() + ($this->_syncWindowDays*24*60*60)) ."000";
                         $soap ='<SearchRequest types="appointment" xmlns="urn:zimbraMail" fetch="'.$id.'" limit="'.$limit.'" offset="'.$offset.'" '.
                                     ' calExpandInstStart="'.$calExpandInstStart.'" calExpandInstEnd="'.$calExpandInstEnd.'" resultMode="IDS" >
                                     <query>inid:"'.$zimbraFolderId.'"</query>
@@ -10119,6 +10255,7 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->SetMessageFlag(): ' .  'Setting Flag' );
 
                     for ($i=0;$i<count($contactEntry);$i++) {
                         if (isset($contactEntry[$i]['_attrs']['type']) && $contactEntry[$i]['_attrs']['type'] == 'group') {  // Skip GROUPS for now
+//                            ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ResolveRecipients(): ' . 'Omitting Group [' .print_r( $contactEntry[$i], true ) . ']' );
                             $recipientResponse->recipientcount -= 1;
 							continue;
                         }
@@ -10460,8 +10597,12 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ResolveRecipients(): ' .  'Maxcerts ['.$max
      * @return array
      */
     public function ChangesSink($timeout = 60) {
-//    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangesSink(): ' .  'START ChangesSink timeout='.$timeout.'; ' );
+    // ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangesSink(): ' .  'START ChangesSink timeout='.$timeout.'; ' );
 
+        // Record starting information for normalizing loop timing
+        $sinkSeconds = $timeout;
+        $sinkStart = microtime(true);
+		
         $notifications = array();
         $clearCacheList = array();
         $needDelay = false;
@@ -10636,8 +10777,22 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ResolveRecipients(): ' .  'Maxcerts ['.$max
             // Mark _cacheChangeToken as ForceRefresh to make sure _folders gets refreshed
             // Changes to linked folders, notified here, will not update the ChangeToken for the current user
             $this->_cacheChangeToken = "ForceRefresh";
-        }
+        } else {
 
+            // Normalise loop timing to allow for the variance in timing of WaitSet requests
+            $sinkEnd = microtime(true);
+            $sinkPause = $sinkSeconds - ($sinkEnd - $sinkStart);
+            // ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ChangesSink(): ' .  'Normalising delay [' . $sinkPause .']' );
+            if ($sinkPause > 1.0) {
+                sleep(floor($sinkPause));
+                $sinkEnd = microtime(true);
+                $sinkPause = $sinkSeconds - ($sinkEnd - $sinkStart);
+            }
+            if ($sinkPause > 0.0) {
+                $sinkPause = floor($sinkPause * 1000000);
+                 usleep($sinkPause);
+            }
+        }
 
         return $notifications;
     }
@@ -11994,8 +12149,13 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->MeetingResponse(): INVITE-REPLY-RESPONSE:' 
             ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . $this->error);
             $response = false;
             if ($this->_soapError == "service.AUTH_EXPIRED") {
-                ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'zimbra Auth Token has expired - Throw SYNC_COMMONSTATUS_SERVERERROR to force a new connection/re-auth' );
-                throw new StatusException("Zimbra->SoapRequest(): Auth Token Expired - Force client to reconnect.", SYNC_COMMONSTATUS_SERVERERROR);
+//                ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'zimbra Auth Token has expired - Throw SYNC_COMMONSTATUS_SERVERERROR to force a new connection/re-auth' );
+//                throw new StatusException("Zimbra->SoapRequest(): Auth Token Expired - Force client to reconnect.", SYNC_COMMONSTATUS_SERVERERROR);
+                ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'zimbra Auth Token has expired - Throw AuthenticationRequiredException to force a new connection/re-auth' );
+                throw new AuthenticationRequiredException("Zimbra->SoapRequest(): Auth Token Expired - Force client to reconnect.");
+            } elseif ($this->_soapError == "account.AUTH_FAILED") {
+                ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'zimbra Auth Failed - Throw AuthenticationRequiredException to force a new connection/re-auth' );
+                throw new AuthenticationRequiredException("Zimbra->SoapRequest(): Auth Failed - Force client to reconnect.");
             } elseif ($this->_soapError == "service.PERM_DENIED") {
                 ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'SOAP Message: '.$soap_message_debug);
                 ZLog::Write(LOGLEVEL_ERROR, 'Zimbra->SoapRequest(): ' . 'SOAP Response: '.$response, false);
@@ -12813,7 +12973,13 @@ ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->ExtractHtmlErrorTitle(): ' . 'errorTitle ['
                 $array = json_decode($response, true);
                 unset($response);
 
+//                if (!isset($array['Body']['GetMsgResponse']['m'][0]['inv'][0]['tz'][0])) {
+//                    ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetLocalTzObject(): ' . "No TimeZone returned on Dummy appointment - Verify the default TmeZone is set for the domain in the Admin Tool!");
+//                    $tzInfo = array();
+//                } else {
+
                 $tzInfo = $array['Body']['GetMsgResponse']['m'][0]['inv'][0]['tz'][0];
+//                }
                 unset($array);
 
                 $tzObject = $this->GetTz($tzInfo);
@@ -13022,7 +13188,31 @@ class BackendSearchZimbra implements ISearchProvider {
         $total = 0;
         $rangeMax = 999;  // Max allowed for Mailbox Search Results
 
-        ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'Mailbox search ' );
+        if ($cpo->GetFindSearchId()) {
+            ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'Mailbox search from Find command' );
+
+            // Called from Find
+            $findsearch = true;
+            $findsearchid = $cpo->GetFindSearchId();
+            ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'FindSearchId ['.$findsearchid.']' );
+            // if subfolders are required, do a recursive search
+            $deeptraversal = $cpo->GetFindDeepTraversal();
+            $searchrange = $cpo->GetFindRange();
+            $searchFolderClass = $cpo->GetFindFolderType();
+            $searchfreetext = $cpo->GetFindFreeText();
+            $folderid = $cpo->GetFindFolderId();
+        } else {
+            ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'Mailbox search from Search command' );
+
+            // Called from Search
+            $findsearch = false;
+            // if subfolders are required, do a recursive search
+            $deeptraversal = $cpo->GetSearchDeepTraversal();
+            $searchrange = $cpo->GetSearchRange();
+            $searchFolderClass = $cpo->GetSearchClass();
+            $searchfreetext = $cpo->GetSearchFreeText();
+            $folderid = $cpo->GetSearchFolderId();
+        }
 
         if ($cpo->GetRebuildResults()) {
             $rebuildresults = true;
@@ -13032,15 +13222,19 @@ class BackendSearchZimbra implements ISearchProvider {
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'RebuildResults ['.$rebuildresults.']' );
 
         // if subfolders are required, do a recursive search
+/*
         if ($cpo->GetSearchDeepTraversal()) {
             $deeptraversal = true;
         } else {
             $deeptraversal = false;
         }
+*/
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'DeepTraversal ['.$deeptraversal.']' );
 
-        if ($cpo->GetSearchRange()) {
-            $range = explode("-",$cpo->GetSearchRange());
+//        if ($cpo->GetSearchRange()) {
+//            $range = explode("-",$cpo->GetSearchRange());
+        if (isset($searchrange)) {
+            $range = explode("-",$searchrange);
             if ($range[1] > $rangeMax) {
                 throw new StatusException("BackendSearchZimbra->GetMailboxSearchResults(): Range exceeds maximum allowed! ", SYNC_SEARCHSTATUS_STORE_ENDOFRETRANGE);
             }
@@ -13053,7 +13247,7 @@ class BackendSearchZimbra implements ISearchProvider {
 
         // default to Email search
         $foldertype = "message";
-        $searchFolderClass = $cpo->GetSearchClass();
+//        $searchFolderClass = $cpo->GetSearchClass();
         if (!empty($searchFolderClass)) {
             switch ($searchFolderClass) {
                 case 'Email':
@@ -13068,12 +13262,12 @@ class BackendSearchZimbra implements ISearchProvider {
 
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'FolderType ['.$foldertype.']' );
 
-        $searchfreetext = $cpo->GetSearchFreeText();
+//        $searchfreetext = $cpo->GetSearchFreeText();
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'SearchFreeText ['.$searchfreetext.']' );
         if (empty($searchfreetext)) return false;
 
 
-        $folderid = $cpo->GetSearchFolderId();
+//        $folderid = $cpo->GetSearchFolderId();
         if (!empty($folderid)) {
             ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetMailboxSearchResults(): ' .  'FolderId ['.$folderid.']' );
 
@@ -13474,7 +13668,7 @@ class BackendSearchZimbra implements ISearchProvider {
         ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetGALSearchResults(): ' .  'START GetGALSearchResults { searchquery = ' . $searchquery . '; searchrange = ' . $searchrange . '; searchpicture = ' . $searchpicture . ' }');
 
         $total = 0;
-        $rangeMax = 99;  // Max allowed for GAL Search Results
+        $resultsMax = 10;  // Max allowed for GAL Search Results per MS ActiveSync Spec
 
         // If (RETURN) key pressed on Samsung client while typing, it adds "<" before and ">, " after the partial name.
         // These should be stripped before attempting a search
@@ -13489,16 +13683,12 @@ class BackendSearchZimbra implements ISearchProvider {
         $rows['searchtotal'] = 0;
 
         $find = $searchquery;
-        if (isset($searchrange)) {
-            $range = explode("-",$searchrange);
-            if ($range[1] > $rangeMax) {
-                throw new StatusException("BackendSearchZimbra->GetGALSearchResults(): Range exceeds maximum allowed! ", SYNC_SEARCHSTATUS_STORE_ENDOFRETRANGE);
-            }
-            $limit = $range[1] - $range[0] + 1;
-            $rangeMax = $range[1];
-        } else {
-            $range = "0-" . $RangeMax; 
+        if (!isset($searchrange)) {
+            //Default as per protocol
+            $searchrange = "0-99"; 
         }
+        $range = explode("-",$searchrange);
+        $limit = $range[1] - $range[0] + 1;
 
         $rangelimiter = ' limit="'.$limit.'" offset="'.$range[0].'" '; 
 
@@ -13521,6 +13711,11 @@ class BackendSearchZimbra implements ISearchProvider {
                 $total = 0;
             }
             unset($array);
+
+            if ($total > $resultsMax) {
+                unset($items);
+                throw new StatusException("BackendSearchZimbra->GetGALSearchResults(): Range exceeds maximum allowed! ", SYNC_SEARCHSTATUS_STORE_ENDOFRETRANGE);
+            }
 
             for ($i=0;$i<$total;$i++) {
                 $username = ""; //$items[$i]['fileAsStr'];
@@ -13574,7 +13769,7 @@ class BackendSearchZimbra implements ISearchProvider {
         }
 
 
-        ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetGALSearchResults(): ' . 'END GetGALSearchResults { ' . $total . ' Matches Found }');
+        ZLog::Write(LOGLEVEL_DEBUG, 'Zimbra->GetGALSearchResults(): ' . 'END GetGALSearchResults { ' . $total . ' Match(es) Found }');
 
         return $rows;
 	

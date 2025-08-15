@@ -1,8 +1,8 @@
-==============  Z-Push-2 Zimbra Backend - Installation Notes - Release 71  ==============
+==============  Z-Push-2 Zimbra Backend - Installation Notes - Release 73  ==============
 
-**  RELEASE 71 is designed to work with Z-Push 2.5 or later  **
+**  RELEASE 73 is designed to work with Z-Push 2.7 or later  **
 
-Z-PUSH 2.5.x is now stable - but is still under development - There is still the possibility 
+Z-PUSH 2.7.x is now stable - but is still under development - There is still the possibility 
 that updates to Z-PUSH will break things in the ZIMBRA backend from time to time. Any
 issues found should be reported on the Support Ticket Tracker on the SourceForge web site
 https://sourceforge.net/p/zimbrabackend/support-requests/  They will be addressed as 
@@ -13,6 +13,13 @@ SHOW YOUR APPRECIATION
 If you would like to show your appreciation for the work that goes into this zimbra backend
 please send a donation via 
 https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=7X94XCP9A5ZYG&lc=IE&currency_code=EUR&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHosted
+
+
+New for Release 72 and later. Three new config settings have been added. 
+ZIMBRA_SYNC_WINDOW_DAYS allows overriding the default sync max window of +/- 366 days
+ZIMBRA_SYNC_GAL_GROUPS allows overriding the default of not syncing GAL groups
+ZIMBRA_USE_MB_CHECK_ENCODING allows for PHP 8.1+ to use traditional preference ordered
+searching for source encoding. See details of each in the Release Notes.
 
 
 New For Release 71 and later. A new config file flag ZIMBRA_DELETESASMOVES was added that
@@ -212,6 +219,15 @@ check free/busy times when creating appointments amongst others.
 *
 *                   === To prevent sync of the "emailed contacts" folder
 *                   define('ZIMBRA_IGNORE_EMAILED_CONTACTS',true);
+*
+*                   === To change the default device sync window of 366 days ===
+*                   define('ZIMBRA_SYNC_WINDOW_DAYS', 366);
+*
+*                   === To enable sync of GAL Groups to devices ===
+*                   define('ZIMBRA_SYNC_GAL_GROUPS', true);
+*
+*                   === To enable sync of mb_check_encoding for PHP 8.1+ ===
+*                   define('ZIMBRA_USE_MB_CHECK_ENCODING', true);
 *
 *                   === To enable HTML email for MIME supporting devices - mainly Apple iPxxx ===
 *                   define('ZIMBRA_HTML',true);

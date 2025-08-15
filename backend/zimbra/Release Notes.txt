@@ -1,11 +1,11 @@
-==============  Z-Push Zimbra Backend - Release Notes - Release 71 ==============
+==============  Z-Push Zimbra Backend - Release Notes - Release 72 ==============
 
-THESE RELEASE NOTES ARE FOR RELEASE 71 CHANGES 
+THESE RELEASE NOTES ARE FOR RELEASE 72 CHANGES 
 
-**  RELEASE 71 is designed to work with Z-Push 2.5 or later **
+**  RELEASE 72 is designed to work with Z-Push 2.5 or later **
 
-PLEASE READ THESE RELEASE NOTES COMPLETELY BEFORE IMPLEMENTING RELEASE 70
-NOTE THAT THE RELEASE NOTES FOR 37-70 ARE ALSO CONTAINED BELOW AND SHOULD 
+PLEASE READ THESE RELEASE NOTES COMPLETELY BEFORE IMPLEMENTING RELEASE 72
+NOTE THAT THE RELEASE NOTES FOR 37-71 ARE ALSO CONTAINED BELOW AND SHOULD 
 ALSO BE READ FULLY WHEN UPGRADING FROM A RELEASE 48 OR EARLIER.
 THIS IS EXPECIALLY CRITICAL IF YOU ARE TURNING ON ANY OF THE NEW FEATURES
 AND ARE UPGRADING AN EXISTING INSTALLATION FROM RELEASE 48 OR EARLIER. 
@@ -16,6 +16,13 @@ If you would like to show your appreciation for the work that goes into this zim
 please send a donation via 
 https://www.paypal.com/cgi-bin/webscr?cmd=_donations&business=7X94XCP9A5ZYG&lc=IE&currency_code=EUR&bn=PP%2dDonationsBF%3abtn_donateCC_LG%2egif%3aNonHosted
 
+
+
+New for Release 72 and later. Three new config settings have been added. 
+ZIMBRA_SYNC_WINDOW_DAYS allows overriding the default sync max window of +/- 366 days
+ZIMBRA_SYNC_GAL_GROUPS allows overriding the default of not syncing GAL groups
+ZIMBRA_USE_MB_CHECK_ENCODING allows for PHP 8.1+ to use traditional preference ordered
+searching for source encoding. See details of each below.
 
 
 New For Release 71 and later. A new config file flag ZIMBRA_DELETESASMOVES was added that
@@ -85,9 +92,134 @@ Use a text editor to search for each of the functions in turn, and add the =fals
 
 
 
+Changes Made To Revision 73: z-push-2 version ONLY
+ - Added pause to ChangesSink to normalise timing loop
+ - Add filters to skip non-supported folder views
+ - Added code to support AS16.1 Find command in GetMailboxSearchResults
+ - Check for empty from address in email to avoid warnings
+ - Fix displayto to show Text without email address where possible
+
+
+Added pause to ChangesSink to normalise timing loop
+===================================================
+Added pause to ChangesSink to normalise timing loop as the duration of WaitSet requests 
+will vary depending on how busy/loaded the server is 
+
+
+Add filters to skip non-supported folder views
+==============================================
+Add filters to skip non-supported folder views introduced in zimbra 9 and later. Folder
+type "comment" has been observed 
+
+
+Added code to support AS16.1 Find command in GetMailboxSearchResults
+====================================================================
+Added code to support AS16.1 Find command in GetMailboxSearchResults. This is to allow
+search on iDevices to continue to work when it erroneously sends the Find command instead
+of the Search command even though the Find command is not part of the ActiveSync spec
+until 16.1  
+
+
+Check for empty from address in email to avoid warnings
+=======================================================
+Check for empty from address in email to avoid warnings in the log when anonymous emails
+are received
+
+
+Fix displayto to show Text without email address where possible
+===============================================================
+Fix displayto to show Text without email address where possible. Previously, the complete
+email address and label were included
+
+
+
+Changes Made To Revision 72: z-push-2 version ONLY
+ - GetNextMessageBlock - Moved optional parameter output to last place
+ - Changed range handling in GetGALSearchResults
+ - Added config.php option ZIMBRA_SYNC_WINDOW_DAYS
+ - Add Auth Failed/Token Expired handling for XML responses
+ - New setting ZIMBRA_SYNC_GAL_GROUPS
+ - Ensure $bodyPrefArray is always an array, never false, for PHP 8.1+
+ - New setting ZIMBRA_USE_MB_CHECK_ENCODING for PHP 8.1+
+ - Add handling for Zimbra 10 "Files shared with me"
+
+
+GetNextMessageBlock - Moved optional parameter output to last place
+===================================================================
+GetNextMessageBlock - Moved optional parameter output to last place in the list so as to 
+be compatible with PHP 8.x
+
+
+Changed range handling in GetGALSearchResults
+=============================================
+Changed range handling in GetGALSearchResults as iOS devices running recent iOS versions 
+are passing an unexpected search range in the request. The change will not limit the 
+search range accepted
+
+
+Added config.php option ZIMBRA_SYNC_WINDOW_DAYS
+===============================================
+By default the zimbra client uses a 366 day before and after window for choosing which
+Calendar/Task/Note items to sync to the device. This arbitrary limit was selected when
+the devices connecting were showing a limited window of data. However, now that people
+are connecting with Outlook and expecting everything to be synced this is no longer
+ideal. The setting ZIMBRA_SYNC_WINDOW_DAYS can override that default number. In order 
+to specify a different value (from the default of 366) uncomment this setting and set 
+it to the appropriate value. Change this setting at your own risk as widening the 
+window could have unexpected consequences. Regardless of what value is set here, if 
+the client supplies a cutoffdate for searching backwards that value will be used.
+//    define('ZIMBRA_SYNC_WINDOW_DAYS', 366);
+
+
+Add Auth Failed/Token Expired handling for XML responses
+========================================================
+Add Auth Failed/Token Expired handling for XML responses in function SoapRequest to 
+match the handling for JSON responses - throw new AuthenticationRequiredException
+
+
+New setting ZIMBRA_SYNC_GAL_GROUPS
+==================================
+Historically, the Zmbra Backend has not synced any "group" contacts to the devices.
+Feature Request #30 - https://sourceforge.net/p/zimbrabackend/feature-requests/30
+has argued the case for allowing GAL groups to sync while still blocking user created
+groups as before. Adding a new setting ZIMBRA_SYNC_GAL_GROUPS to enable syncing GAL  
+groups for those that wish to do so. The default value will be false to maintain
+the status quo for those who choose not to set a value 
+//    define('ZIMBRA_SYNC_GAL_GROUPS', false);
+
+
+Ensure $bodyPrefArray is always an array, never false, for PHP 8.1+
+===================================================================
+Ensure $bodyPrefArray is always an array, never false, for PHP 8.1+ as it throws 
+an error
+
+
+New setting ZIMBRA_USE_MB_CHECK_ENCODING for PHP 8.1+
+=====================================================
+PHP 8.1 changed the way mb_detect_encoding works (see details of the change in
+https://github.com/php/php-src/issues/8279). For some users this has caused encoding
+problems. As outlined in 4th to last comment on the issue, a loop of calls to
+mb_check_encoding can emulate the previous behaviour. For those that need the 
+previous behaviour in the backend a new setting has been added. The default value 
+of false will continue to use the mb_detect_encoding but with the new detection 
+methodology. Setting the value to true will loop through the encodings specified 
+(or defaulted) in ZIMBRA_MB_DETECT_ORDER returning the first one that passes 
+mb_check_encoding 
+//    define('ZIMBRA_USE_MB_CHECK_ENCODING', false);
+
+
+Add handling for Zimbra 10 "Files shared with me"
+=================================================
+Add handling for Zimbra 10 "Files shared with me". This is an experimental fix for now
+as I am currently unable to figure out how to populate the folder - perhaps it is a 
+NETWORK edition feature related to the zimbra drive?? Fix for now is to exclude the
+folder from syncing
+
+
+
 Changes Made To Revision 71: z-push-2 version ONLY
  - Removed zimbra specific version of include file z_RTF.php
- - Don't output "" for empty Task dates and reminderset
+ - Don't output "" for empty Task dates and reminders
  - Changed mail.NO_SUCH_WAITSET to LOGLEVEL_DEBUG
  - Replaced all references to debugLog with ZLog::Write(LOGLEVEL_DEBUG,
  - New override setting ZIMBRA_DELETESASMOVES added
