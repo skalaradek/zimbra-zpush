@@ -5,7 +5,7 @@ Details: https://imanudin.net/2023/10/07/exchange-activesync-for-zimbra-open-sou
 
 Tested with Ubuntu 22.04 and Zimbra 10.1.9.p1 (zcs-10.1.9_GA_4200001.UBUNTU22_64.20250721164603.tgz)  
 ```
-apt install php-cli php-soap php-mbstring php-curl php-fpm php-intl git  
+apt install php-cli php-soap php-mbstring php-curl php-fpm php-intl php-simplexml git  
 vim /etc/php/8.1/fpm/pool.d/www.conf
  //change listen port to:
  //listen = 127.0.0.1:9000
