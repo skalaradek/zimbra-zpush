@@ -31,7 +31,7 @@
     // define('ZPUSH_HOST', 'zpush.example.com');
 
     // Defines the default time zone, change e.g. to "Europe/London" if necessary
-    define('TIMEZONE', '');
+    define('TIMEZONE', 'Europe/Prague');
 
     // Defines the base path on the server
     define('BASE_PATH', dirname($_SERVER['SCRIPT_FILENAME']). '/');
@@ -107,4 +107,4 @@
  *  Backend settings
  */
     // the backend data provider
-    define('BACKEND_PROVIDER', '');
+    define('BACKEND_PROVIDER', 'BackendZimbra');
