@@ -43,7 +43,7 @@ if ! $DRY_RUN; then
       /# Proxy to Zimbra Mailbox Upstream/d;
       /proxy_pass[[:space:]]\+\$autodiscover_upstream;/d;
       /# End stray redirect hack/a\
-        \n        # Z-Push start\n        include /opt/z-push/nginx-zpush.conf;\n        # Z-Push end\n
+        \n        # Z-Push start\n        include /opt/z-push/nginx-zpush-autodiscover.conf;\n        # Z-Push end\n
     }' "$TEMPLATE"
   fi
 
